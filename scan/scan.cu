@@ -27,6 +27,29 @@ static inline int nextPow2(int n) {
     return n;
 }
 
+
+
+__global__ void exclusive_scan_kernel1(int rounded_length,int* result,int two_d,int two_dplus1) {
+    int threadIndex = threadIdx.x + blockIdx.x * blockDim.x;
+    int i = threadIndex*two_dplus1;
+    int index = i + two_dplus1 - 1;
+    int index2 = i + two_d - 1;
+    if (index >= rounded_length || index2>= rounded_length || threadIndex>=rounded_length/two_d) return;
+    result[index] += result[index2];
+}
+
+__global__ void exclusive_scan_kernel2(int rounded_length, int* result,int two_d,int two_dplus1) {
+    int threadIndex = threadIdx.x + blockIdx.x * blockDim.x;
+    int i = threadIndex*two_dplus1;
+    int index = i + two_dplus1 - 1;
+    int index2 = i + two_d - 1;
+    if (index >= rounded_length || index2>= rounded_length || threadIndex>=rounded_length/two_d) return;
+    int t = result[index2];
+    result[index2] = result[index];
+    result[index] += t;
+}
+
+
 // exclusive_scan --
 //
 // Implementation of an exclusive scan on global memory array `input`,
@@ -45,14 +68,33 @@ static inline int nextPow2(int n) {
 void exclusive_scan(int* input, int N, int* result)
 {
 
-    // CS149 TODO:
-    //
-    // Implement your exclusive scan implementation here.  Keep in
-    // mind that although the arguments to this function are device
-    // allocated arrays, this is a function that is running in a thread
-    // on the CPU.  Your implementation will need to make multiple calls
-    // to CUDA kernel functions (that you must write) to implement the
-    // scan.
+    int rounded_length = nextPow2(N);
+    cudaMemcpy(result, input, N * sizeof(int), cudaMemcpyDeviceToDevice);   
+    if(rounded_length > N){
+        cudaMemset(result+N,0,(rounded_length-N)*sizeof(int));
+    }
+
+    // upsweep phase
+    for (int two_d = 1; two_d <= rounded_length/2; two_d*=2) {
+        int two_dplus1 = 2*two_d;
+        //We only need as many threads as the for loop below will have iterations, numThreads is based on the value of two_dplus1
+        //Take ceiling of N/two_dplus1 to get the number of blocks needed
+        int totalThreads = (N + two_dplus1 - 1) / two_dplus1;
+        int numBlocks = (totalThreads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        //Launch the kernel with the number of blocks and threads calculated above
+        exclusive_scan_kernel1<<<numBlocks, THREADS_PER_BLOCK>>>(rounded_length, result, two_d, two_dplus1);
+        cudaDeviceSynchronize();
+    }
+    cudaMemset(result+rounded_length-1,0,sizeof(int));
+
+    // downsweep phase
+    for (int two_d = rounded_length/2; two_d >= 1; two_d /= 2) {
+        int two_dplus1 = 2*two_d;
+        int totalThreads = (N + two_dplus1 - 1) / two_dplus1;
+        int numBlocks = (totalThreads + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        exclusive_scan_kernel2<<<numBlocks, THREADS_PER_BLOCK>>>(rounded_length, result, two_d, two_dplus1);
+        cudaDeviceSynchronize();
+    }
 
 
 }
@@ -103,7 +145,12 @@ double cudaScan(int* inarray, int* end, int* resultarray)
        
     cudaMemcpy(resultarray, device_result, (end - inarray) * sizeof(int), cudaMemcpyDeviceToHost);
 
+
     double overallDuration = endTime - startTime;
+
+    cudaFree(device_result);
+    cudaFree(device_input);
+
     return overallDuration; 
 }
 
@@ -140,7 +187,23 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration; 
 }
 
+__global__ void find_repeats_kernel1(int* device_input, int* device_output, int length) {
+    int threadIndex = threadIdx.x + blockIdx.x * blockDim.x;
+    if (threadIndex >= length-1) return;
+    if (device_input[threadIndex] == device_input[threadIndex + 1]) {
+        device_output[threadIndex] = 1;
+    } else {
+        device_output[threadIndex] = 0;
+    }
+}
 
+__global__ void find_repeats_kernel2(int* device_mask, int* device_cumulative_input, int length,int* device_output) {
+    int threadIndex = threadIdx.x + blockIdx.x * blockDim.x;
+    if (threadIndex >= length-1) return;
+    if (device_mask[threadIndex] == 1) {
+        device_output[device_cumulative_input[threadIndex]] = threadIndex;
+    }
+}
 // find_repeats --
 //
 // Given an array of integers `device_input`, returns an array of all
@@ -160,8 +223,32 @@ int find_repeats(int* device_input, int length, int* device_output) {
     // exclusive_scan function with them. However, your implementation
     // must ensure that the results of find_repeats are correct given
     // the actual array length.
+    int rounded_length = nextPow2(length);
+    //Device mask will be used to show where A[i] == A[i+1]
+    //Device cumulative_input will be used to store the exclusive scan of the mask, to get the index where it should be placed in the output array
+    int *device_mask;
+    int *device_cumulative_input;
+    cudaMalloc((void **)&device_mask, sizeof(int) * rounded_length);
+    cudaMalloc((void **)&device_cumulative_input, sizeof(int) * rounded_length);
+    cudaMemset(device_mask, 0, sizeof(int) * rounded_length);
+    int blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    //Launch kernel to find where A[i] == A[i+1], and store it in device_mask
+    find_repeats_kernel1<<<blocks, THREADS_PER_BLOCK>>>(device_input, device_mask, length);
+    cudaDeviceSynchronize();
+    //Launch exclusive scan on device_mask, and store the result in device_cumulative_input, if A[i]==2 then we know that value of i should be stored at 2 in the output array
+    exclusive_scan(device_mask, length, device_cumulative_input);
+    cudaDeviceSynchronize();
+    //Launch kernel to store the index of the pairs in device_output, using device_cumulative_input as the index to store it in
+    find_repeats_kernel2<<<blocks, THREADS_PER_BLOCK>>>(device_mask, device_cumulative_input, length, device_output);
+    cudaDeviceSynchronize();
 
-    return 0; 
+    int result = 0;
+    //Last index of device_cumulative_input will be the number of pairs found
+    cudaMemcpy(&result, device_cumulative_input + length - 1, sizeof(int), cudaMemcpyDeviceToHost);
+
+    cudaFree(device_mask);
+    cudaFree(device_cumulative_input);
+    return result; 
 }
 
 

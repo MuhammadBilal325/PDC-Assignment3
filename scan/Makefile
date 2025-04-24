@@ -24,7 +24,7 @@ OBJDIR=objs
 CXXFLAGS=-O3 -Wall
 LDFLAGS=-L/usr/local/cuda/lib64/ -lcudart
 NVCC=nvcc
-NVCCFLAGS=-O3 -m64
+NVCCFLAGS=-O3 -m64 -Wno-deprecated-gpu-targets
 
 
 OBJS=$(OBJDIR)/main.o  $(OBJDIR)/scan.o
