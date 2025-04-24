@@ -419,28 +419,28 @@ __global__ void kernelRenderCircles()
     int blockL = blockIdx.x * blockDim.x;
     int blockB = blockIdx.y * blockDim.y;
 
-    float boxL = invWidth * float(blockL);
-    float boxB = invHeight * float(blockB);
-    float boxR = invWidth * float(blockL + blockDim.x);
-    float boxT = invHeight * float(blockB + blockDim.y);
+    float boxLeft = invWidth * float(blockL);
+    float boxBottom = invHeight * float(blockB);
+    float boxRight = invWidth * float(blockL + blockDim.x);
+    float boxTop = invHeight * float(blockB + blockDim.y);
     // Compute the index of the thread in the block
-    int batch_index = threadIdx.x + (threadIdx.y * blockDim.x);
+    int indexInBatch = threadIdx.x + (threadIdx.y * blockDim.x);
 
-    __shared__ uint circleFlags[BLOCK_SIZE]; // Tells whether the circle on the specified index intersects with the pixel in the block
-    __shared__ uint sScratch[2 * BLOCK_SIZE];
-    __shared__ uint sOutput[BLOCK_SIZE];
+    __shared__ uint circleInBlock[BLOCK_SIZE]; // Tells whether the circle on the specified index intersects with the pixel in the block
+    __shared__ uint scanTempStorage[2 * BLOCK_SIZE];
+    __shared__ uint scanResult[BLOCK_SIZE];
     __shared__ uint circlesToRender;
     __shared__ uint circleIndexes[BLOCK_SIZE];
 
-    if (batch_index == 0)
+    if (indexInBatch == 0)
     {
         circlesToRender = 0;
     }
-    circleFlags[batch_index] = 0;
-    circleIndexes[batch_index] = 0;
-    sOutput[batch_index] = 0;
-    sScratch[batch_index] = 0;
-    sScratch[batch_index + BLOCK_SIZE] = 0;
+    circleInBlock[indexInBatch] = 0;
+    circleIndexes[indexInBatch] = 0;
+    scanResult[indexInBatch] = 0;
+    scanTempStorage[indexInBatch] = 0;
+    scanTempStorage[indexInBatch + BLOCK_SIZE] = 0;
 
     float4 *imgPtr = (float4 *)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
     float4 localImg = *imgPtr;
@@ -448,32 +448,36 @@ __global__ void kernelRenderCircles()
 
     // We distribute the work of checking if the pixel is within the circle's bounding box to all threads in the block
     // Each thread checks a different circle in the block and stores the result in the shared memory array circleFlags
+    // We run it until i is less than the number of circles in the scene because there may be more than BLOCK_SIZE circles in the scene
+    // Every thread must go through the loop even if its not rendering the circle because we need to synchronize the threads and have
+    // the sharedMemExclusiveScan which requires all threads to participate
     for (int i = 0; i < numCircles; i += BLOCK_SIZE)
     {
-        int globalCircleIndex = i + batch_index;
+        int globalCircleIndex = i + indexInBatch;
         if (globalCircleIndex < numCircles)
         {
             float3 p = *((float3 *)(&cuConstRendererParams.position[3 * globalCircleIndex]));
             float rad = cuConstRendererParams.radius[globalCircleIndex];
-            circleFlags[batch_index] = circleInBoxConservative(p.x, p.y, rad, boxL, boxR, boxT, boxB);
+            circleInBlock[indexInBatch] = circleInBoxConservative(p.x, p.y, rad, boxLeft, boxRight, boxTop, boxBottom);
         }
         else
         {
-            circleFlags[batch_index] = 0;
+            circleInBlock[indexInBatch] = 0;
         }
         __syncthreads();
-        // We use a parallel reduction to get the indices that the circles that intersect with the pixel must be placed at in the circleIntersected array
-        sharedMemExclusiveScan(batch_index, circleFlags, sOutput, sScratch, BLOCK_SIZE);
+        // We use a parallel scan to get the indices that the circles that intersect with the pixel must be placed at in the circleIntersected array
+        sharedMemExclusiveScan(indexInBatch, circleInBlock, scanResult, scanTempStorage, BLOCK_SIZE);
         __syncthreads();
-        if (batch_index == 0)
+        if (indexInBatch == 0)
         {
-            circlesToRender = sOutput[BLOCK_SIZE - 1] + circleFlags[BLOCK_SIZE - 1];
+            circlesToRender = scanResult[BLOCK_SIZE - 1] + circleInBlock[BLOCK_SIZE - 1];
         }
-        if (circleFlags[batch_index] == 1)
+        if (circleInBlock[indexInBatch] == 1)
         {
-            circleIndexes[sOutput[batch_index]] = globalCircleIndex;
+            circleIndexes[scanResult[indexInBatch]] = globalCircleIndex;
         }
         __syncthreads();
+        //On each scan of the global circle array, we render the circles that intersect with the pixel before we move onto the next scan
         for (int j = 0; j < circlesToRender; j++)
         {
 
@@ -482,7 +486,9 @@ __global__ void kernelRenderCircles()
             shadePixel(circleIndex, pixelCenterNorm, p, &localImg);
         }
     }
+    //Write pixel color to global memory before exiting from thread
     *imgPtr = localImg;
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
