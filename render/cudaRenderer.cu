@@ -409,8 +409,7 @@ __global__ void kernelRenderCircles()
     short imageWidth = cuConstRendererParams.imageWidth;
     short imageHeight = cuConstRendererParams.imageHeight;
 
-    if (pixelX >= imageWidth || pixelY >= imageHeight)
-        return;
+    bool inBounds = (pixelX < imageWidth && pixelY < imageHeight);
     int numCircles = cuConstRendererParams.numCircles;
 
     float invWidth = 1.f / static_cast<float>(imageWidth);
@@ -442,10 +441,14 @@ __global__ void kernelRenderCircles()
     scanTempStorage[indexInBatch] = 0;
     scanTempStorage[indexInBatch + BLOCK_SIZE] = 0;
 
-    float4 *imgPtr = (float4 *)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
-    float4 localImg = *imgPtr;
-    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f), invHeight * (static_cast<float>(pixelY) + 0.5f));
 
+    float4 *imgPtr;
+    float4 localImg;
+    if(inBounds){
+        imgPtr = (float4 *)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + pixelX)]);
+        localImg = *imgPtr;
+    }
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f), invHeight * (static_cast<float>(pixelY) + 0.5f));
     // We distribute the work of checking if the pixel is within the circle's bounding box to all threads in the block
     // Each thread checks a different circle in the block and stores the result in the shared memory array circleFlags
     // We run it until i is less than the number of circles in the scene because there may be more than BLOCK_SIZE circles in the scene
@@ -478,17 +481,21 @@ __global__ void kernelRenderCircles()
         }
         __syncthreads();
         //On each scan of the global circle array, we render the circles that intersect with the pixel before we move onto the next scan
-        for (int j = 0; j < circlesToRender; j++)
-        {
+        if(inBounds){
 
-            int circleIndex = circleIndexes[j];
-            float3 p = *((float3 *)(&cuConstRendererParams.position[3 * circleIndex]));
-            shadePixel(circleIndex, pixelCenterNorm, p, &localImg);
+            for (int j = 0; j < circlesToRender; j++)
+            {
+                
+                int circleIndex = circleIndexes[j];
+                float3 p = *((float3 *)(&cuConstRendererParams.position[3 * circleIndex]));
+                shadePixel(circleIndex, pixelCenterNorm, p, &localImg);
+            }
         }
     }
     //Write pixel color to global memory before exiting from thread
-    *imgPtr = localImg;
-
+    if(inBounds){
+        *imgPtr = localImg;
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
