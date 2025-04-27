@@ -430,6 +430,7 @@ __global__ void kernelRenderCircles()
     __shared__ uint scanResult[BLOCK_SIZE];
     __shared__ uint circlesToRender;
     __shared__ uint circleIndexes[BLOCK_SIZE];
+    __shared__ float3 sharedP[BLOCK_SIZE];
 
     if (indexInBatch == 0)
     {
@@ -440,7 +441,7 @@ __global__ void kernelRenderCircles()
     scanResult[indexInBatch] = 0;
     scanTempStorage[indexInBatch] = 0;
     scanTempStorage[indexInBatch + BLOCK_SIZE] = 0;
-
+    sharedP[indexInBatch] = make_float3(0.f, 0.f, 0.f);
 
     float4 *imgPtr;
     float4 localImg;
@@ -478,17 +479,15 @@ __global__ void kernelRenderCircles()
         if (circleInBlock[indexInBatch] == 1)
         {
             circleIndexes[scanResult[indexInBatch]] = globalCircleIndex;
+            sharedP[scanResult[indexInBatch]] = *((float3 *)(&cuConstRendererParams.position[3 * globalCircleIndex]));
         }
         __syncthreads();
         //On each scan of the global circle array, we render the circles that intersect with the pixel before we move onto the next scan
         if(inBounds){
-
             for (int j = 0; j < circlesToRender; j++)
-            {
-                
+            {      
                 int circleIndex = circleIndexes[j];
-                float3 p = *((float3 *)(&cuConstRendererParams.position[3 * circleIndex]));
-                shadePixel(circleIndex, pixelCenterNorm, p, &localImg);
+                shadePixel(circleIndex, pixelCenterNorm, sharedP[j], &localImg);
             }
         }
     }

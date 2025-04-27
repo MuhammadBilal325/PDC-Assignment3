@@ -192,15 +192,13 @@ __global__ void find_repeats_kernel1(int* device_input, int* device_output, int 
     if (threadIndex >= length-1) return;
     if (device_input[threadIndex] == device_input[threadIndex + 1]) {
         device_output[threadIndex] = 1;
-    } else {
-        device_output[threadIndex] = 0;
-    }
+    } 
 }
 
 __global__ void find_repeats_kernel2(int* device_mask, int* device_cumulative_input, int length,int* device_output) {
     int threadIndex = threadIdx.x + blockIdx.x * blockDim.x;
     if (threadIndex >= length-1) return;
-    if (device_mask[threadIndex] == 1) {
+    if (device_mask[threadIndex]) {
         device_output[device_cumulative_input[threadIndex]] = threadIndex;
     }
 }
@@ -212,17 +210,7 @@ __global__ void find_repeats_kernel2(int* device_mask, int* device_cumulative_in
 // Returns the total number of pairs found
 int find_repeats(int* device_input, int length, int* device_output) {
 
-    // CS149 TODO:
-    //
-    // Implement this function. You will probably want to
-    // make use of one or more calls to exclusive_scan(), as well as
-    // additional CUDA kernel launches.
-    //    
-    // Note: As in the scan code, the calling code ensures that
-    // allocated arrays are a power of 2 in size, so you can use your
-    // exclusive_scan function with them. However, your implementation
-    // must ensure that the results of find_repeats are correct given
-    // the actual array length.
+    
     int rounded_length = nextPow2(length);
     //Device mask will be used to show where A[i] == A[i+1]
     //Device cumulative_input will be used to store the exclusive scan of the mask, to get the index where it should be placed in the output array
